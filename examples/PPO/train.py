@@ -1,4 +1,4 @@
-#   Copyright (c) 2018 PaddlePaddle Authors. All Rights Reserved.
+#   Copyright (c) 2022 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,180 +13,155 @@
 # limitations under the License.
 
 import argparse
-import gym
 import numpy as np
-from mujoco_agent import MujocoAgent
+from parl.utils import logger, summary
+
+from mujoco_config import mujoco_config
+from atari_config import atari_config
+from env_utils import ParallelEnv, LocalEnv
+from storage import RolloutStorage
+from atari_model import AtariModel
 from mujoco_model import MujocoModel
 from parl.algorithms import PPO
-from parl.utils import logger, action_mapping
-from utils import *
+from agent import PPOAgent
 
 
-def run_train_episode(env, agent, scaler):
-    obs = env.reset()
-    observes, actions, rewards, unscaled_obs = [], [], [], []
-    step = 0.0
-    scale, offset = scaler.get()
-    scale[-1] = 1.0  # don't scale time step feature
-    offset[-1] = 0.0  # don't offset time step feature
-    while True:
-        obs = obs.reshape((1, -1))
-        obs = np.append(obs, [[step]], axis=1)  # add time step feature
-        unscaled_obs.append(obs)
-        obs = (obs - offset) * scale  # center and scale observations
-        obs = obs.astype('float32')
-        observes.append(obs)
-
-        action = agent.policy_sample(obs)
-        action = np.clip(action, -1.0, 1.0)
-        action = action_mapping(action, env.action_space.low[0],
-                                env.action_space.high[0])
-
-        action = action.reshape((1, -1)).astype('float32')
-        actions.append(action)
-
-        obs, reward, done, _ = env.step(np.squeeze(action))
-        rewards.append(reward)
-        step += 1e-3  # increment time step feature
-
-        if done:
-            break
-
-    return (np.concatenate(observes), np.concatenate(actions),
-            np.array(rewards, dtype='float32'), np.concatenate(unscaled_obs))
-
-
-def run_evaluate_episode(env, agent, scaler):
-    obs = env.reset()
-    rewards = []
-    step = 0.0
-    scale, offset = scaler.get()
-    scale[-1] = 1.0  # don't scale time step feature
-    offset[-1] = 0.0  # don't offset time step feature
-    while True:
-        obs = obs.reshape((1, -1))
-        obs = np.append(obs, [[step]], axis=1)  # add time step feature
-        obs = (obs - offset) * scale  # center and scale observations
-        obs = obs.astype('float32')
-
-        action = agent.policy_predict(obs)
-        action = action_mapping(action, env.action_space.low[0],
-                                env.action_space.high[0])
-
-        obs, reward, done, _ = env.step(np.squeeze(action))
-        rewards.append(reward)
-
-        step += 1e-3  # increment time step feature
-
-        if done:
-            break
-    return np.sum(rewards)
-
-
-def collect_trajectories(env, agent, scaler, episodes):
-    all_obs, all_actions, all_rewards, all_unscaled_obs = [], [], [], []
-    for e in range(episodes):
-        obs, actions, rewards, unscaled_obs = run_train_episode(
-            env, agent, scaler)
-        all_obs.append(obs)
-        all_actions.append(actions)
-        all_rewards.append(rewards)
-        all_unscaled_obs.append(unscaled_obs)
-    scaler.update(np.concatenate(all_unscaled_obs)
-                  )  # update running statistics for scaling observations
-    return np.concatenate(all_obs), np.concatenate(
-        all_actions), np.concatenate(all_rewards)
+# Runs policy until 'real done' and returns episode reward
+# A fixed seed is used for the eval environment
+def run_evaluate_episodes(agent, eval_env, eval_episodes):
+    eval_episode_rewards = []
+    while len(eval_episode_rewards) < eval_episodes:
+        obs = eval_env.reset()
+        done = False
+        while not done:
+            action = agent.predict(obs)
+            obs, reward, done, info = eval_env.step(action)
+        if "episode" in info.keys():
+            eval_reward = info["episode"]["r"]
+            eval_episode_rewards.append(eval_reward)
+    return np.mean(eval_episode_rewards)
 
 
 def main():
-    env = gym.make(args.env)
+    config = mujoco_config if args.continuous_action else atari_config
+    if args.env_num:
+        config['env_num'] = args.env_num
+    config['env'] = args.env
+    config['seed'] = args.seed
+    config['xparl_addr'] = args.xparl_addr
+    config['test_every_steps'] = args.test_every_steps
+    config['train_total_steps'] = args.train_total_steps
 
-    obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.shape[0]
-    obs_dim += 1  # add 1 to obs dim for time step feature
+    config['batch_size'] = int(config['env_num'] * config['step_nums'])
+    config['num_updates'] = int(
+        config['train_total_steps'] // config['batch_size'])
 
-    scaler = Scaler(obs_dim)
+    logger.info("------------------- PPO ---------------------")
+    logger.info('Env: {}, seed: {}'.format(config['env'], config['seed']))
+    logger.info("---------------------------------------------")
+    logger.set_dir('./train_logs/{}_{}'.format(config['env'], config['seed']))
 
-    model = MujocoModel(obs_dim, act_dim)
-    hyperparas = {
-        'act_dim': act_dim,
-        'policy_lr': model.policy_lr,
-        'value_lr': model.value_lr
-    }
-    alg = PPO(model, hyperparas)
-    agent = MujocoAgent(
-        alg, obs_dim, act_dim, args.kl_targ, loss_type=args.loss_type)
+    envs = ParallelEnv(config)
+    eval_env = LocalEnv(config['env'], test=True)
 
-    # run a few episodes to initialize scaler
-    collect_trajectories(env, agent, scaler, episodes=5)
+    obs_space = eval_env.obs_space
+    act_space = eval_env.act_space
 
-    episode = 0
-    while episode < args.num_episodes:
-        obs, actions, rewards = collect_trajectories(
-            env, agent, scaler, episodes=args.episodes_per_batch)
-        episode += args.episodes_per_batch
+    if config['continuous_action']:
+        model = MujocoModel(obs_space, act_space)
+    else:
+        model = AtariModel(obs_space, act_space)
+    ppo = PPO(
+        model,
+        clip_param=config['clip_param'],
+        entropy_coef=config['entropy_coef'],
+        initial_lr=config['initial_lr'],
+        continuous_action=config['continuous_action'])
+    agent = PPOAgent(ppo, config)
 
-        pred_values = agent.value_predict(obs)
+    rollout = RolloutStorage(config['step_nums'], config['env_num'], obs_space,
+                             act_space)
 
-        # scale rewards
-        scale_rewards = rewards * (1 - args.gamma)
+    obs = envs.reset()
+    done = np.zeros(config['env_num'], dtype='float32')
 
-        discount_sum_rewards = calc_discount_sum_rewards(
-            scale_rewards, args.gamma)
-        discount_sum_rewards = discount_sum_rewards.astype('float32')
+    test_flag = 0
+    total_steps = 0
+    for update in range(1, config['num_updates'] + 1):
+        for step in range(0, config['step_nums']):
+            total_steps += 1 * config['env_num']
 
-        advantages = calc_gae(scale_rewards, pred_values, args.gamma, args.lam)
-        # normalize advantages
-        advantages = (advantages - advantages.mean()) / (
-            advantages.std() + 1e-6)
-        advantages = advantages.astype('float32')
+            value, action, logprob, _ = agent.sample(obs)
+            next_obs, reward, next_done, info = envs.step(action)
+            rollout.append(obs, action, logprob, reward, done, value.flatten())
+            obs, done = next_obs, next_done
 
-        policy_loss, kl = agent.policy_learn(obs, actions, advantages)
-        value_loss = agent.value_learn(obs, discount_sum_rewards)
+            for k in range(config['env_num']):
+                if done[k] and "episode" in info[k].keys():
+                    logger.info(
+                        "Training: total steps: {}, episode rewards: {}".
+                        format(total_steps, info[k]['episode']['r']))
+                    summary.add_scalar("train/episode_reward",
+                                       info[k]["episode"]["r"], total_steps)
 
-        logger.info(
-            'Episode {}, Train reward: {}, Policy loss: {}, KL: {}, Value loss: {}'
-            .format(episode,
-                    np.sum(rewards) / args.episodes_per_batch, policy_loss, kl,
-                    value_loss))
-        if episode % (args.episodes_per_batch * 5) == 0:
-            eval_reward = run_evaluate_episode(env, agent, scaler)
-            logger.info('Episode {}, Evaluate reward: {}'.format(
-                episode, eval_reward))
+        # Bootstrap value if not done
+        value = agent.value(obs)
+        rollout.compute_returns(value, done)
+
+        # Optimizing the policy and value network
+        value_loss, action_loss, entropy_loss, lr = agent.learn(rollout)
+
+        if (total_steps + 1) // config['test_every_steps'] >= test_flag:
+            while (total_steps + 1) // config['test_every_steps'] >= test_flag:
+                test_flag += 1
+
+            if config['continuous_action']:
+                # set running mean and variance of obs
+                ob_rms = envs.eval_ob_rms
+                eval_env.env.set_ob_rms(ob_rms)
+
+            avg_reward = run_evaluate_episodes(agent, eval_env,
+                                               config['eval_episode'])
+            summary.add_scalar('eval/episode_reward', avg_reward, total_steps)
+            logger.info('Evaluation over: {} episodes, Reward: {}'.format(
+                config['eval_episode'], avg_reward))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '--env',
+        "--env",
         type=str,
-        help='Mujoco environment name',
-        default='HalfCheetah-v2')
+        default="PongNoFrameskip-v4",
+        help="OpenAI gym environment name")
     parser.add_argument(
-        '--num_episodes',
+        "--seed", type=int, default=None, help="seed of the experiment")
+    parser.add_argument(
+        "--env_num",
         type=int,
-        help='Number of episodes to run',
-        default=10000)
+        default=None,
+        help=
+        "number of the environment. Note: if greater than 1, xparl is needed")
     parser.add_argument(
-        '--gamma', type=float, help='Discount factor', default=0.995)
+        '--continuous_action',
+        action='store_true',
+        default=False,
+        help='action type of the environment')
     parser.add_argument(
-        '--lam',
-        type=float,
-        help='Lambda for Generalized Advantage Estimation',
-        default=0.98)
-    parser.add_argument(
-        '--kl_targ', type=float, help='D_KL target value', default=0.003)
-    parser.add_argument(
-        '--episodes_per_batch',
-        type=int,
-        help='Number of episodes per training batch',
-        default=5)
-    parser.add_argument(
-        '--loss_type',
+        "--xparl_addr",
         type=str,
-        help="Choose loss type of PPO algorithm, 'CLIP' or 'KLPEN'",
-        default='CLIP')
+        default=None,
+        help="xparl address for distributed training ")
+    parser.add_argument(
+        '--train_total_steps',
+        type=int,
+        default=10e6,
+        help='number of total time steps to train (default: 10e6)')
+    parser.add_argument(
+        '--test_every_steps',
+        type=int,
+        default=int(5e3),
+        help='the step interval between two consecutive evaluations')
 
     args = parser.parse_args()
-
     main()

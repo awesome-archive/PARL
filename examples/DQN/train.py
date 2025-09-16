@@ -1,4 +1,4 @@
-#   Copyright (c) 2018 PaddlePaddle Authors. All Rights Reserved.
+#   Copyright (c) 2020 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,139 +12,130 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
-import gym
-import paddle.fluid as fluid
-import numpy as np
 import os
-from atari_agent import AtariAgent
-from atari_model import AtariModel
-from collections import deque
-from datetime import datetime
-from replay_memory import ReplayMemory, Experience
+import gym
+import numpy as np
+import parl
+import argparse
+from parl.utils import logger, ReplayMemory
+from cartpole_model import CartpoleModel
+from cartpole_agent import CartpoleAgent
+from parl.env import CompatWrapper, is_gym_version_ge
 from parl.algorithms import DQN
-from parl.utils import logger
-from tqdm import tqdm
-from utils import get_player
 
-MEMORY_SIZE = 1e6
-MEMORY_WARMUP_SIZE = MEMORY_SIZE // 20
-IMAGE_SIZE = (84, 84)
-CONTEXT_LEN = 4
-FRAME_SKIP = 4
-UPDATE_FREQ = 4
+LEARN_FREQ = 5  # training frequency
+MEMORY_SIZE = 200000
+MEMORY_WARMUP_SIZE = 200
+BATCH_SIZE = 64
+LEARNING_RATE = 0.0005
 GAMMA = 0.99
-LEARNING_RATE = 1e-3 * 0.5
 
 
-def run_train_episode(env, agent, rpm):
+# train an episode
+def run_train_episode(agent, env, rpm):
     total_reward = 0
-    all_cost = []
-    state = env.reset()
+    obs = env.reset()
     step = 0
     while True:
         step += 1
-        context = rpm.recent_state()
-        context.append(state)
-        context = np.stack(context, axis=0)
-        action = agent.sample(context)
-        next_state, reward, isOver, _ = env.step(action)
-        rpm.append(Experience(state, action, reward, isOver))
-        # start training
-        if rpm.size() > MEMORY_WARMUP_SIZE:
-            if step % UPDATE_FREQ == 0:
-                batch_all_state, batch_action, batch_reward, batch_isOver = rpm.sample_batch(
-                    args.batch_size)
-                batch_state = batch_all_state[:, :CONTEXT_LEN, :, :]
-                batch_next_state = batch_all_state[:, 1:, :, :]
-                cost = agent.learn(batch_state, batch_action, batch_reward,
-                                   batch_next_state, batch_isOver)
-                all_cost.append(float(cost))
-        total_reward += reward
-        state = next_state
-        if isOver:
-            break
-    if all_cost:
-        logger.info('[Train]total_reward: {}, mean_cost: {}'.format(
-            total_reward, np.mean(all_cost)))
-    return total_reward, step
+        action = agent.sample(obs)
+        next_obs, reward, done, _ = env.step(action)
+        rpm.append(obs, action, reward, next_obs, done)
+        # train model
+        if (len(rpm) > MEMORY_WARMUP_SIZE) and (step % LEARN_FREQ == 0):
+            # s,a,r,s',done
+            (batch_obs, batch_action, batch_reward, batch_next_obs,
+             batch_done) = rpm.sample_batch(BATCH_SIZE)
+            train_loss = agent.learn(batch_obs, batch_action, batch_reward,
+                                     batch_next_obs, batch_done)
 
-
-def run_evaluate_episode(env, agent):
-    state = env.reset()
-    total_reward = 0
-    while True:
-        action = agent.predict(state)
-        state, reward, isOver, info = env.step(action)
         total_reward += reward
-        if isOver:
+        obs = next_obs
+        if done:
             break
     return total_reward
 
 
+# evaluate 5 episodes
+def run_evaluate_episodes(agent, eval_episodes=5, render=False):
+    # Compatible for different versions of gym
+    if is_gym_version_ge("0.26.0") and render:  # if gym version >= 0.26.0
+        env = gym.make('CartPole-v1', render_mode="human")
+    else:
+        env = gym.make('CartPole-v1')
+    env = CompatWrapper(env)
+
+    eval_reward = []
+    for i in range(eval_episodes):
+        obs = env.reset()
+        episode_reward = 0
+        while True:
+            action = agent.predict(obs)
+            obs, reward, done, _ = env.step(action)
+            episode_reward += reward
+            if render:
+                env.render()
+            if done:
+                break
+        eval_reward.append(episode_reward)
+    return np.mean(eval_reward)
+
+
 def main():
-    env = get_player(
-        args.rom, image_size=IMAGE_SIZE, train=True, frame_skip=FRAME_SKIP)
-    test_env = get_player(
-        args.rom,
-        image_size=IMAGE_SIZE,
-        frame_skip=FRAME_SKIP,
-        context_len=CONTEXT_LEN)
-    rpm = ReplayMemory(MEMORY_SIZE, IMAGE_SIZE, CONTEXT_LEN)
-    action_dim = env.action_space.n
+    env = gym.make('CartPole-v0')
+    # Compatible for different versions of gym
+    env = CompatWrapper(env)
+    obs_dim = env.observation_space.shape[0]
+    act_dim = env.action_space.n
+    logger.info('obs_dim {}, act_dim {}'.format(obs_dim, act_dim))
 
-    hyperparas = {
-        'action_dim': action_dim,
-        'lr': LEARNING_RATE,
-        'gamma': GAMMA
-    }
-    model = AtariModel(action_dim)
-    algorithm = DQN(model, hyperparas)
-    agent = AtariAgent(algorithm, action_dim)
+    # set action_shape = 0 while in discrete control environment
+    rpm = ReplayMemory(MEMORY_SIZE, obs_dim, 0)
 
-    with tqdm(total=MEMORY_WARMUP_SIZE) as pbar:
-        while rpm.size() < MEMORY_WARMUP_SIZE:
-            total_reward, step = run_train_episode(env, agent, rpm)
-            pbar.update(step)
+    # build an agent
+    model = CartpoleModel(obs_dim=obs_dim, act_dim=act_dim)
+    alg = DQN(model, gamma=GAMMA, lr=LEARNING_RATE)
+    agent = CartpoleAgent(
+        alg, act_dim=act_dim, e_greed=0.1, e_greed_decrement=1e-6)
 
-    # train
-    test_flag = 0
-    pbar = tqdm(total=1e8)
-    recent_100_reward = []
-    total_step = 0
-    max_reward = None
-    while True:
-        # start epoch
-        total_reward, step = run_train_episode(env, agent, rpm)
-        total_step += step
-        pbar.set_description('[train]exploration:{}'.format(agent.exploration))
-        pbar.update(step)
+    # warmup memory
+    while len(rpm) < MEMORY_WARMUP_SIZE:
+        run_train_episode(agent, env, rpm)
 
-        if total_step // args.test_every_steps == test_flag:
-            pbar.write("testing")
-            eval_rewards = []
-            for _ in tqdm(range(3), desc='eval agent'):
-                eval_reward = run_evaluate_episode(test_env, agent)
-                eval_rewards.append(eval_reward)
-            test_flag += 1
-            logger.info(
-                "eval_agent done, (steps, eval_reward): ({}, {})".format(
-                    total_step, np.mean(eval_rewards)))
-        if total_step > 1e8:
-            break
+    max_episode = args.max_episode
 
-    pbar.close()
+    # start training
+    episode = 0
+    while episode < max_episode:
+        # train part
+        for i in range(50):
+            total_reward = run_train_episode(agent, env, rpm)
+            episode += 1
+
+        # test part
+        eval_reward = run_evaluate_episodes(agent, render=False)
+        logger.info('episode:{}    e_greed:{}   Test reward:{}'.format(
+            episode, agent.e_greed, eval_reward))
+
+    # save the parameters to ./model.ckpt
+    save_path = './model.ckpt'
+    agent.save(save_path)
+
+    # save the model and parameters of policy network for inference
+    save_inference_path = './inference_model'
+    input_shapes = [[None, env.observation_space.shape[0]]]
+    input_dtypes = ['float32']
+    agent.save_inference_model(save_inference_path, input_shapes, input_dtypes)
 
 
 if __name__ == '__main__':
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('--rom', help='atari rom', required=True)
     parser.add_argument(
-        '--batch_size', type=int, default=64, help='batch size for training')
-    parser.add_argument(
-        '--test_every_steps',
+        '--max_episode',
         type=int,
-        default=100000,
-        help='every steps number to run test')
+        default=800,
+        help='stop condition: number of max episode')
     args = parser.parse_args()
+
     main()

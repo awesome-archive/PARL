@@ -1,4 +1,4 @@
-#   Copyright (c) 2018 PaddlePaddle Authors. All Rights Reserved.
+#   Copyright (c) 2022 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,85 +12,52 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import parl
+import paddle
+import paddle.nn as nn
 import numpy as np
-import parl.layers as layers
-from paddle import fluid
-from paddle.fluid.param_attr import ParamAttr
-from parl.framework.model_base import Model
 
 
-class MujocoModel(Model):
-    def __init__(self, obs_dim, act_dim, init_logvar=-1.0):
-        self.policy_model = PolicyModel(obs_dim, act_dim, init_logvar)
-        self.value_model = ValueModel(obs_dim, act_dim)
-        self.policy_lr = self.policy_model.lr
-        self.value_lr = self.value_model.lr
+class MujocoModel(parl.Model):
+    """ The Model for Mujoco env
+    Args:
+        obs_space (Box): observation space.
+        act_space (Box): action space.
+    """
 
-    def policy(self, obs):
-        return self.policy_model.policy(obs)
+    def __init__(self, obs_space, act_space):
+        super(MujocoModel, self).__init__()
 
-    def policy_sample(self, obs):
-        return self.policy_model.sample(obs)
+        self.fc1 = nn.Linear(obs_space.shape[0], 64)
+        self.fc2 = nn.Linear(64, 64)
 
-    def value(self, obs):
-        return self.value_model.value(obs)
+        self.fc_value = nn.Linear(64, 1)
 
-
-class PolicyModel(Model):
-    def __init__(self, obs_dim, act_dim, init_logvar):
-        self.obs_dim = obs_dim
-        self.act_dim = act_dim
-        hid1_size = obs_dim * 10
-        hid3_size = act_dim * 10
-        hid2_size = int(np.sqrt(hid1_size * hid3_size))
-
-        self.lr = 9e-4 / np.sqrt(hid2_size)
-
-        self.fc1 = layers.fc(size=hid1_size, act='tanh')
-        self.fc2 = layers.fc(size=hid2_size, act='tanh')
-        self.fc3 = layers.fc(size=hid3_size, act='tanh')
-        self.fc4 = layers.fc(size=act_dim, act='tanh')
-
-        self.logvars = layers.create_parameter(
-            shape=[act_dim],
+        self.fc_policy = nn.Linear(64, np.prod(act_space.shape))
+        self.fc_pi_std = paddle.static.create_parameter(
+            [1, np.prod(act_space.shape)],
             dtype='float32',
-            default_initializer=fluid.initializer.ConstantInitializer(
-                init_logvar))
-
-    def policy(self, obs):
-        hid1 = self.fc1(obs)
-        hid2 = self.fc2(hid1)
-        hid3 = self.fc3(hid2)
-        means = self.fc4(hid3)
-        logvars = self.logvars()
-        return means, logvars
-
-    def sample(self, obs):
-        means, logvars = self.policy(obs)
-        sampled_act = means + (
-            layers.exp(logvars / 2.0) *  # stddev
-            layers.gaussian_random(shape=(self.act_dim, ), dtype='float32'))
-        return sampled_act
-
-
-class ValueModel(Model):
-    def __init__(self, obs_dim, act_dim):
-        super(ValueModel, self).__init__()
-        hid1_size = obs_dim * 10
-        hid3_size = 5
-        hid2_size = int(np.sqrt(hid1_size * hid3_size))
-
-        self.lr = 1e-2 / np.sqrt(hid2_size)
-
-        self.fc1 = layers.fc(size=hid1_size, act='tanh')
-        self.fc2 = layers.fc(size=hid2_size, act='tanh')
-        self.fc3 = layers.fc(size=hid3_size, act='tanh')
-        self.fc4 = layers.fc(size=1)
+            default_initializer=nn.initializer.Constant(value=0))
 
     def value(self, obs):
-        hid1 = self.fc1(obs)
-        hid2 = self.fc2(hid1)
-        hid3 = self.fc3(hid2)
-        V = self.fc4(hid3)
-        V = layers.squeeze(V, axes=[])
-        return V
+        """ Get value network prediction
+        Args:
+            obs (np.array): current observation
+        """
+        out = paddle.tanh(self.fc1(obs))
+        out = paddle.tanh(self.fc2(out))
+        value = self.fc_value(out)
+        return value
+
+    def policy(self, obs):
+        """ Get policy network prediction
+        Args:
+            obs (np.array): current observation
+        """
+        out = paddle.tanh(self.fc1(obs))
+        out = paddle.tanh(self.fc2(out))
+        action_mean = self.fc_policy(out)
+
+        action_logstd = self.fc_pi_std
+        action_std = paddle.exp(action_logstd)
+        return action_mean, action_std

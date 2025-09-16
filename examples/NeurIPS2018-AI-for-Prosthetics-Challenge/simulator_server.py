@@ -28,7 +28,8 @@ from concurrent import futures
 from multi_head_ddpg import MultiHeadDDPG
 from opensim_agent import OpenSimAgent
 from opensim_model import OpenSimModel
-from parl.utils import logger, ReplayMemory
+from parl.utils import logger
+from replay_memory import ReplayMemory
 from utils import calc_indicators, ScalarsManager, TransitionExperience
 
 ACT_DIM = 19
@@ -112,7 +113,7 @@ class SimulatorServer(simulator_pb2_grpc.SimulatorServicer):
 
     def Send(self, request, context):
         """ Implement Send function in SimulatorServicer
-        Everytime a request comming, will create a new thread to handle
+        Everytime a request coming, will create a new thread to handle
     """
         ident, obs, reward, done, info = request.id, request.observation, request.reward, request.done, request.info
         client = self.clients[ident]

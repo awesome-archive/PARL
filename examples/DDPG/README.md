@@ -1,29 +1,28 @@
 ## Reproduce DDPG with PARL
-Based on PARL, the DDPG model of deep reinforcement learning is reproduced, and the same level of indicators of the paper is reproduced in the classic Mujoco game.
+Based on PARL, the DDPG algorithm of deep reinforcement learning has been reproduced, reaching the same level of indicators as the paper in Mujoco benchmarks.
 
-+ DDPG in
-[Continuous control with deep reinforcement learning](https://arxiv.org/abs/1509.02971)
+> Paper: DDPG in [Continuous control with deep reinforcement learning](https://arxiv.org/abs/1509.02971)
 
 ### Mujoco games introduction
-Please see [here](https://github.com/openai/mujoco-py) to know more about Mujoco game.
+PARL currently supports the open-source version of Mujoco provided by DeepMind, so users do not need to download binaries of Mujoco as well as install mujoco-py and get license. For more details, please visit [Mujoco](https://github.com/deepmind/mujoco).
 
 ### Benchmark result
-- HalfCheetah-v2
-<img src=".benchmark/DDPG_HalfCheetah-v2.png"/>  
+
+<img src="https://github.com/benchmarking-rl/PARL-experiments/blob/master/DDPG/paddle/result.png" width="600" alt="DDPG_results"/>
++ Each experiment was run three times with different seeds
 
 ## How to use
 ### Dependencies:
-+ python2.7 or python3.5+
-+ [paddlepaddle>=1.0.0](https://github.com/PaddlePaddle/Paddle)
-+ [parl](https://github.com/PaddlePaddle/PARL)
-+ gym
-+ tqdm
-+ mujoco-py>=1.50.1.0
++ python3.7+
++ [parl>=2.1.1](https://github.com/PaddlePaddle/PARL)
++ [paddlepaddle>=2.0.0](https://github.com/PaddlePaddle/Paddle)
++ gym>=0.26.0
++ mujoco>=2.2.2
 
 ### Start Training:
 ```
-# To train an agent for HalfCheetah-v2 game
-python train.py
+# To train an agent for HalfCheetah-v4 game
+# python train.py
 
 # To train for other game
 # python train.py --env [ENV_NAME]

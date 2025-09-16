@@ -1,4 +1,4 @@
-#   Copyright (c) 2018 PaddlePaddle Authors. All Rights Reserved.
+#   Copyright (c) 2021 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,23 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
+import os
 import gym
 import numpy as np
-from cartpole_agent import CartpoleAgent
-from cartpole_model import CartpoleModel
-from parl.algorithms import PolicyGradient
+import parl
 from parl.utils import logger
-from utils import calc_discount_norm_reward
+from parl.env import CompatWrapper, is_gym_version_ge
+from cartpole_model import CartpoleModel
+from cartpole_agent import CartpoleAgent
+import argparse
 
-OBS_DIM = 4
-ACT_DIM = 2
-GAMMA = 0.99
 LEARNING_RATE = 1e-3
-SEED = 1
 
 
-def run_train_episode(env, agent):
+# train an episode
+def run_train_episode(agent, env):
     obs_list, action_list, reward_list = [], [], []
     obs = env.reset()
     while True:
@@ -44,48 +42,84 @@ def run_train_episode(env, agent):
     return obs_list, action_list, reward_list
 
 
-def run_evaluate_episode(env, agent):
-    obs = env.reset()
-    all_reward = 0
-    while True:
-        if args.eval_vis:
-            env.render()
-        action = agent.predict(obs)
-        obs, reward, done, info = env.step(action)
-        all_reward += reward
-        if done:
-            break
-    return all_reward
+# evaluate 5 episodes
+def run_evaluate_episodes(agent, eval_episodes=5, render=False):
+    # Compatible for different versions of gym
+    if is_gym_version_ge("0.26.0") and render:  # if gym version >= 0.26.0
+        env = gym.make('CartPole-v1', render_mode="human")
+    else:
+        env = gym.make('CartPole-v1')
+    env = CompatWrapper(env)
+
+    eval_reward = []
+    for i in range(eval_episodes):
+        obs = env.reset()
+        episode_reward = 0
+        while True:
+            action = agent.predict(obs)
+            obs, reward, isOver, _ = env.step(action)
+            episode_reward += reward
+            if render:
+                env.render()
+            if isOver:
+                break
+        eval_reward.append(episode_reward)
+    return np.mean(eval_reward)
+
+
+def calc_reward_to_go(reward_list, gamma=1.0):
+    for i in range(len(reward_list) - 2, -1, -1):
+        # G_i = r_i + γ·G_i+1
+        reward_list[i] += gamma * reward_list[i + 1]  # Gt
+    return np.array(reward_list)
 
 
 def main():
-    env = gym.make("CartPole-v0")
-    env.seed(SEED)
-    np.random.seed(SEED)
-    model = CartpoleModel(act_dim=ACT_DIM)
-    alg = PolicyGradient(model, hyperparas={'lr': LEARNING_RATE})
-    agent = CartpoleAgent(alg, obs_dim=OBS_DIM, act_dim=ACT_DIM, seed=SEED)
+    env = gym.make('CartPole-v1')
+    # Compatible for different versions of gym
+    env = CompatWrapper(env)
+    # env = env.unwrapped # Cancel the minimum score limit
+    obs_dim = env.observation_space.shape[0]
+    act_dim = env.action_space.n
+    logger.info('obs_dim {}, act_dim {}'.format(obs_dim, act_dim))
 
-    for i in range(1000):
-        obs_list, action_list, reward_list = run_train_episode(env, agent)
-        logger.info("Episode {}, Reward Sum {}.".format(i, sum(reward_list)))
+    # build an agent
+    model = CartpoleModel(obs_dim=obs_dim, act_dim=act_dim)
+    alg = parl.algorithms.PolicyGradient(model, lr=LEARNING_RATE)
+    agent = CartpoleAgent(alg)
+
+    # load model and evaluate
+    # if os.path.exists('./model.ckpt'):
+    #     agent.restore('./model.ckpt')
+    #     run_evaluate_episodes(agent, env, render=True)
+    #     exit()
+
+    for i in range(args.max_episodes):
+        obs_list, action_list, reward_list = run_train_episode(agent, env)
+        if i % 10 == 0:
+            logger.info("Episode {}, Reward Sum {}.".format(
+                i, sum(reward_list)))
 
         batch_obs = np.array(obs_list)
         batch_action = np.array(action_list)
-        batch_reward = calc_discount_norm_reward(reward_list, GAMMA)
+        batch_reward = calc_reward_to_go(reward_list)
 
         agent.learn(batch_obs, batch_action, batch_reward)
         if (i + 1) % 100 == 0:
-            all_reward = run_evaluate_episode(env, agent)
-            logger.info('Test reward: {}'.format(all_reward))
+            total_reward = run_evaluate_episodes(agent, render=False)
+            logger.info('Test reward: {}'.format(total_reward))
+
+    # save the parameters to ./model.ckpt
+    agent.save('./model.ckpt')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    # Environment
     parser.add_argument(
-        '--eval_vis',
-        action='store_true',
-        help='if set, will visualize the game when evaluating')
+        '--max_episodes',
+        type=int,
+        default=1000,
+        help='stop condition: number of episodes')
     args = parser.parse_args()
-
     main()

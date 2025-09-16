@@ -19,7 +19,8 @@ For more technical details about our solution, we provide:
 
 ## Dependencies
 - python3.6
-- [paddlepaddle>=1.2.1](https://github.com/PaddlePaddle/Paddle)
+- [parl==1.0](https://github.com/PaddlePaddle/PARL)
+- [paddlepaddle==1.5.1](https://github.com/PaddlePaddle/Paddle)
 - [osim-rl](https://github.com/stanfordnmbl/osim-rl)
 - [grpcio==1.12.1](https://grpc.io/docs/quickstart/python.html)
 - tqdm
@@ -37,10 +38,10 @@ For final submission, we test our model in 500 CPUs, running 10 episodes per CPU
 - How to Run
 
   1. Enter the sub-folder `final_submit`
-  2. Download the model file from online stroage service, [Baidu Pan](https://pan.baidu.com/s/1NN1auY2eDblGzUiqR8Bfqw) or [Google Drive](https://drive.google.com/open?id=1DQHrwtXzgFbl9dE7jGOe9ZbY0G9-qfq3) 
+  2. Download the model file from online storage service, [Baidu Pan](https://pan.baidu.com/s/1NN1auY2eDblGzUiqR8Bfqw) or [Google Drive](https://drive.google.com/open?id=1DQHrwtXzgFbl9dE7jGOe9ZbY0G9-qfq3) 
   3. Unpack the file by using: 
            `tar zxvf saved_model.tar.gz`
-  4. Launch test scription: 
+  4. Launch the test script: 
            `python test.py`
 
 ## Part2: Curriculum learning
@@ -128,7 +129,8 @@ python test.py --restore_model_path [MODEL_PATH] --ensemble_num [ENSEMBLE_NUM]
 <img src="image/velocity_distribution.png" alt="PARL" width="800"/>
 </p>
 
-Following the above steps correctly, you can get an agent that scores around 9960 in round2. Its performance is slightly poorer than our final submitted model. The score gap results from the multi-stage paradigm. As shown in the above Firgure, the target velocity distribution varies after each change of the target velocity. Thus we actually have 4 models for each stage, they are trained for launch stage, first change stage, second change stage, third change stage respectively. These four models are trained successively, this is, the first stage model is trained while the parameters of launch stage are fixed.We do not provide this part of the code, since it reduces the readability of the code. Feel free to post issue if you have any problem:)
+Following the above steps correctly, you can get an agent that scores around 9960, socring slightly poorer than our final submitted model. The score gap results from the lack of multi-stage-training paradigm. As shown in the above Firgure, the distribution of possible target velocity keeps changing throughout the entire episode, degrading the performance a single model due to the convetional conpept that it's hard to fit a model under different data distributions. Thus we actually have trained 4 models that amis to perform well in different velocity disstribution. These four models are trained successively, this is, we train a model that specializes in start stage(first 60 frames), then fix this start model at first 60 frames, and train another model for rest 940 frames. We do not provide this part of the code, since it reduces the readability of the code. Feel free to post issue if you have any problems :)
+
 
 ## Acknowledgments
 We would like to thank Zhihua Wu, Jingzhou He, Kai Zeng for providing stable computation resources and other colleagues on the Online Learning team for insightful discussions. We are grateful to Tingru Hong, Wenxia Zheng and others for creating a vivid and popular demonstration video.
